@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from urllib.parse import urlparse
 
 from .retriever import Chunk
-from .text_utils import split_sentences, tokenize
+from .text_utils import STOPWORDS, split_sentences, tokenize
 
 # ---- D1 / D6: injection pattern detection (used for user input and for retrieved chunks) ----
 OVERRIDE_RE = re.compile(
@@ -36,7 +36,8 @@ def context_scan(chunks: list[tuple[Chunk, float]]):
 
 
 # ---- D2: document-level access control at retrieval time ----
-def acl_allows(chunk: Chunk) -> bool:
+# Enforced inside the SQL query (`WHERE classification = 'public'`, see Store.search(public_only=True)).
+def acl_allows(chunk: Chunk) -> bool:  # same rule as a python predicate (used by tests)
     return chunk.classification == "public"
 
 
@@ -54,7 +55,7 @@ def sanitize_delimiters(text: str) -> str:
 # ---- D5: output filter (DLP + URL allowlist) ----
 SECRET_RE = re.compile(r"(?:SYS)?CANARY-[A-Za-z0-9_-]+")
 URL_RE = re.compile(r"https?://[^\s)>\]'\"]+")
-ALLOWED_HOSTS = {"acmecloud.example"}
+ALLOWED_HOSTS = {"en.wikipedia.org", "wikipedia.org"}
 
 
 def output_filter(answer: str) -> tuple[str, str | None]:
@@ -67,8 +68,27 @@ def output_filter(answer: str) -> tuple[str, str | None]:
 
 
 # ---- D7: grounding guard ----
-def retrieval_is_weak(retrieved: list[tuple[Chunk, float]], threshold: float) -> bool:
-    return not retrieved or retrieved[0][1] < threshold
+def content_words(query: str) -> list[str]:
+    return [w for w in dict.fromkeys(re.findall(r"[a-z0-9]+", query.lower())) if w not in STOPWORDS]
+
+
+def weighted_coverage(query: str, retrieved: list[tuple[Chunk, float]], idf: dict[str, float]) -> float:
+    """IDF-weighted share of the question's content words that appear in the best retrieved chunk (0..1).
+    BM25 always returns *something*; this asks whether any chunk really covers what was asked."""
+    words = content_words(query)
+    total = sum(idf.get(w, 0.0) for w in words)
+    if not retrieved or total <= 0:
+        return 0.0
+    best = 0.0
+    for chunk, _ in retrieved:
+        toks = set(tokenize(chunk.text))
+        got = sum(idf.get(w, 0.0) for w in words if (tokenize(w) or [None])[0] in toks)
+        best = max(best, got / total)
+    return best
+
+
+def retrieval_is_weak(coverage: float, min_coverage: float) -> bool:
+    return coverage < min_coverage
 
 
 def answer_is_supported(answer: str, chunks: list[Chunk], min_ratio: float = 0.6) -> bool:

@@ -1,3 +1,3 @@
-# Mock backend needs no third-party packages.
+# Mock backend: Python 3.10+ standard library only (needs SQLite with FTS5).
 # Optional real-model backend:
 # anthropic>=0.40
